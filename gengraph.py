@@ -32,32 +32,28 @@ def perturb(graph_list, p):
         perturbed_graph_list.append(G)
     return perturbed_graph_list
 
-""" Synthetic Graph #1:
-
-    Start with Barabasi-Albert graph and attach house-shaped subgraphs.
-
-    Args:
-        nb_shapes         :  The number of shapes (here 'houses') that should be added to the base graph.
-        width_basis       :  The width of the basis graph (here 'Barabasi-Albert' random graph).
-        feature_generator :  A `FeatureGenerator` for node features. If `None`, add constant features to nodes.
-        m                 :  number of edges to attach to existing node (for BA graph)
-
-    Returns:
-        G                 :  A networkx graph
-        role_id           :  A list with length equal to number of nodes in the entire graph (basis
-                          :  + shapes). role_id[i] is the ID of the role of node i. It is the label.
-        name              :  A graph identifier
-    """
 def generate_graph(basis_type="ba", 
                    shape="house", 
                    nb_shapes=80, 
                    width_basis=300, 
                    feature_generator=None, 
                    m=5, 
-                   random_edges=0.0,
-                   edge_weight_mu=0,
-                   edge_weight_sigma=1):
+                   random_edges=0.0):
+    """ Generate a synthetic graph with specified base and shape substructures.
 
+    Args:
+        basis_type (str): Type of base graph (e.g., 'ba' for Barabasi-Albert).
+        shape (str): The shape to attach to the base graph ('house', 'cycle', 'diamond', 'grid').
+        nb_shapes (int): Number of shapes to attach.
+        width_basis (int): Width of the base graph.
+        feature_generator (FeatureGenerator): Generator for node features.
+        m (int): Number of edges to attach from a new node to existing nodes (for BA graph).
+        random_edges (float): Proportion of edges to randomly add to the graph.
+
+    Returns:
+        G (networkx.Graph): The generated graph.
+        role_id (list): List of role IDs for each node.
+    """
     if shape == "house":
         list_shapes = [["house"]] * nb_shapes
     elif shape == "cycle":
@@ -67,7 +63,8 @@ def generate_graph(basis_type="ba",
     elif shape == "grid":
         list_shapes = [["grid"]] * nb_shapes
     else:
-        assert False
+        assert False, f"Unknown shape: {shape}"
+    
     G, role_id, _ = synthetic_structsim.build_graph(width_basis, 
                                                     basis_type, 
                                                     list_shapes, 
@@ -80,18 +77,5 @@ def generate_graph(basis_type="ba",
     
     if feature_generator is not None:
         feature_generator.gen_node_features(G)
-    
-    edge_weight_gen = featgen.EdgeFeatureGen(edge_weight_mu, edge_weight_sigma)
-    edge_weight_gen.gen_edge_features(G)
-    
+        
     return G, role_id
-
-# Example usage of generate_graph
-if __name__ == "__main__":
-    feature_gen = featgen.ConstFeatureGen(val=[1, 2, 3])
-    G, role_id = generate_graph(feature_generator=feature_gen, random_edges=0.1)
-    
-    # Visualize the graph
-    pos = nx.spring_layout(G)
-    nx.draw(G, pos, with_labels=True, node_color=role_id, cmap=plt.get_cmap("viridis"))
-    plt.show()

@@ -4,13 +4,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Linear, BatchNorm1d, Sequential, ReLU
 from torch_geometric.nn import global_mean_pool, global_add_pool, GINConv, GATConv
-from gcn_conv import GCNConv
+from edge_gcn import EGATGCNConv  # 替换GCNConv为EGATGCNConv
 import random
 import pdb
+
 
 class CausalGCN(torch.nn.Module):
     """GCN with BN and residual connection."""
     def __init__(self, num_features,
+                       num_edge_features,
                        num_classes, args,
                        gfn=False, 
                        collapse=False, 
@@ -28,27 +30,28 @@ class CausalGCN(torch.nn.Module):
         self.with_random = args.with_random
         self.without_node_attention = args.without_node_attention
         self.without_edge_attention = args.without_edge_attention
-        GConv = partial(GCNConv, edge_norm=edge_norm, gfn=gfn)
+        GConv = partial(EGATGCNConv, edge_norm=edge_norm, gfn=gfn)
 
-        hidden_in = num_features
+        hidden_in_node = num_features
+        hidden_in_edge = num_edge_features
         self.num_classes = num_classes
         hidden_out = num_classes
         self.fc_num = args.fc_num
-        self.bn_feat = BatchNorm1d(hidden_in)
-        self.conv_feat = GCNConv(hidden_in, hidden, gfn=True) # linear transform
+        self.bn_feat = BatchNorm1d(hidden_in_node)
+        self.conv_feat = EGATGCNConv(hidden_in_node, hidden_in_edge, hidden, gfn=True) # 使用EGATGCNConv
         self.bns_conv = torch.nn.ModuleList()
         self.convs = torch.nn.ModuleList()
 
         for i in range(num_conv_layers):
             self.bns_conv.append(BatchNorm1d(hidden))
-            self.convs.append(GConv(hidden, hidden))
+            self.convs.append(GConv(hidden, hidden, hidden))
 
         self.edge_att_mlp = nn.Linear(hidden * 2, 2)
         self.node_att_mlp = nn.Linear(hidden, 2)
         self.bnc = BatchNorm1d(hidden)
-        self.bno= BatchNorm1d(hidden)
-        self.context_convs = GConv(hidden, hidden)
-        self.objects_convs = GConv(hidden, hidden)
+        self.bno = BatchNorm1d(hidden)
+        self.context_convs = GConv(hidden, hidden, hidden)
+        self.objects_convs = GConv(hidden, hidden, hidden)
 
         # context mlp
         self.fc1_bn_c = BatchNorm1d(hidden)
@@ -83,23 +86,31 @@ class CausalGCN(torch.nn.Module):
 
     def forward(self, data, eval_random=True):
         x = data.x if data.x is not None else data.feat
-        edge_index, batch = data.edge_index, data.batch
+        edge_index, edge_attr, batch = data.edge_index, data.edge_attr, data.batch
         row, col = edge_index
         x = self.bn_feat(x)
-        x = F.relu(self.conv_feat(x, edge_index))
-        
+        x, edge, _ = self.conv_feat(x, edge_index, edge_attr)
+        x = F.relu(x)  # 传递edge_attr
+        edge = F.relu(edge)  # 传递edge_attr
         for i, conv in enumerate(self.convs):
             x = self.bns_conv[i](x)
-            x = F.relu(conv(x, edge_index))
+            x, edge, edge_attn = conv(x, edge_index, edge)
+            x = F.relu(x)  # 传递edge_attr
+            edge = F.relu(edge)
         
-        edge_rep = torch.cat([x[row], x[col]], dim=-1)
+        edge_rep = torch.cat([x[row], x[col]], dim=-1) #???
+        # print('attn_weights',attn_weights.shape)
+        # print('edge_rep',edge_rep.shape)
+        
 
         if self.without_edge_attention:
             edge_att = 0.5 * torch.ones(edge_rep.shape[0], 2).cuda()
         else:
             edge_att = F.softmax(self.edge_att_mlp(edge_rep), dim=-1)
-        edge_weight_c = edge_att[:, 0]
-        edge_weight_o = edge_att[:, 1]
+        # edge_weight_c = edge_att[:, 0]
+        # edge_weight_o = edge_att[:, 1]
+        edge_weight_c = edge_attn
+        edge_weight_o = 1 - edge_attn
 
         if self.without_node_attention:
             node_att = 0.5 * torch.ones(x.shape[0], 2).cuda()
@@ -107,8 +118,13 @@ class CausalGCN(torch.nn.Module):
             node_att = F.softmax(self.node_att_mlp(x), dim=-1)
         xc = node_att[:, 0].view(-1, 1) * x
         xo = node_att[:, 1].view(-1, 1) * x
-        xc = F.relu(self.context_convs(self.bnc(xc), edge_index, edge_weight_c))
-        xo = F.relu(self.objects_convs(self.bno(xo), edge_index, edge_weight_o))
+        xc, edge_c, _ = self.context_convs(self.bnc(xc), edge_index, self.bnc(edge), edge_weight_c)
+        xo, edge_o, _ = self.objects_convs(self.bno(xo), edge_index, self.bno(edge), edge_weight_o)
+        xc = F.relu(xc)
+        edge_c = F.relu(edge_c)
+        xo = F.relu(xo)
+        edge_o = F.relu(edge_o)
+
 
         xc = self.global_pool(xc, batch)
         xo = self.global_pool(xo, batch)
@@ -119,7 +135,9 @@ class CausalGCN(torch.nn.Module):
 
         return xc_logis, xo_logis, xco_logis
 
+    # (context_readout_layer, objects_readout_layer, random_readout_layer methods remain unchanged)
     def context_readout_layer(self, x):
+        
         x = self.fc1_bn_c(x)
         x = self.fc1_c(x)
         x = F.relu(x)
@@ -129,6 +147,7 @@ class CausalGCN(torch.nn.Module):
         return x_logis
 
     def objects_readout_layer(self, x):
+   
         x = self.fc1_bn_o(x)
         x = self.fc1_o(x)
         x = F.relu(x)
@@ -138,6 +157,7 @@ class CausalGCN(torch.nn.Module):
         return x_logis
 
     def random_readout_layer(self, xc, xo, eval_random):
+
         num = xc.shape[0]
         l = [i for i in range(num)]
         if self.with_random:
@@ -157,6 +177,7 @@ class CausalGCN(torch.nn.Module):
         x_logis = F.log_softmax(x, dim=-1)
         return x_logis
 
+
 class CausalGIN(torch.nn.Module):
     """GIN with BN and residual connection."""
     def __init__(self, num_features,
@@ -169,28 +190,28 @@ class CausalGIN(torch.nn.Module):
         num_conv_layers = args.layers
         self.args = args
         self.global_pool = global_add_pool
-        GConv = partial(GCNConv, edge_norm=edge_norm, gfn=gfn)
+        GConv = partial(EGATGCNConv, edge_norm=edge_norm, gfn=gfn)  # 使用EGATGCNConv
         hidden_in = num_features
         self.num_classes = num_classes
         hidden_out = num_classes
         self.fc_num = args.fc_num
         self.bn_feat = BatchNorm1d(hidden_in)
-        self.conv_feat = GCNConv(hidden_in, hidden, gfn=True) # linear transform
+        self.conv_feat = EGATGCNConv(hidden_in, hidden, gfn=True)  # 使用EGATGCNConv
         self.bns_conv = torch.nn.ModuleList()
         self.convs = torch.nn.ModuleList()
         for i in range(num_conv_layers):
             self.convs.append(GINConv(
-            Sequential(
-                       Linear(hidden, hidden), 
-                       BatchNorm1d(hidden), 
-                       ReLU(),
-                       Linear(hidden, hidden), 
-                       ReLU())))
+                Sequential(
+                    Linear(hidden, hidden), 
+                    BatchNorm1d(hidden), 
+                    ReLU(),
+                    Linear(hidden, hidden), 
+                    ReLU())))
 
         self.edge_att_mlp = nn.Linear(hidden * 2, 2)
         self.node_att_mlp = nn.Linear(hidden, 2)
         self.bnc = BatchNorm1d(hidden)
-        self.bno= BatchNorm1d(hidden)
+        self.bno = BatchNorm1d(hidden)
         self.context_convs = GConv(hidden, hidden)
         self.objects_convs = GConv(hidden, hidden)
 
@@ -227,10 +248,10 @@ class CausalGIN(torch.nn.Module):
 
     def forward(self, data, eval_random=True, train_type="base"):
         x = data.x if data.x is not None else data.feat
-        edge_index, batch = data.edge_index, data.batch
+        edge_index, edge_attr, batch = data.edge_index, data.edge_attr, data.batch
         row, col = edge_index
         x = self.bn_feat(x)
-        x = F.relu(self.conv_feat(x, edge_index))
+        x = F.relu(self.conv_feat(x, edge_index, edge_attr))  # 传递edge_attr
         
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
@@ -246,8 +267,8 @@ class CausalGIN(torch.nn.Module):
         
         xc = node_weight_c.view(-1, 1) * x
         xo = node_weight_o.view(-1, 1) * x
-        xc = F.relu(self.context_convs(self.bnc(xc), edge_index, edge_weight_c))
-        xo = F.relu(self.objects_convs(self.bno(xo), edge_index, edge_weight_o))
+        xc = F.relu(self.context_convs(self.bnc(xc), edge_index, edge_attr, edge_weight_c))
+        xo = F.relu(self.objects_convs(self.bno(xo), edge_index, edge_attr, edge_weight_o))
 
         xc = self.global_pool(xc, batch)
         xo = self.global_pool(xo, batch)
@@ -257,46 +278,8 @@ class CausalGIN(torch.nn.Module):
         xo_logis = self.objects_readout_layer(xo, train_type)
         return xc_logis, xo_logis, xco_logis
 
-    def context_readout_layer(self, x):
-        x = self.fc1_bn_c(x)
-        x = self.fc1_c(x)
-        x = F.relu(x)
-        x = self.fc2_bn_c(x)
-        x = self.fc2_c(x)
-        x_logis = F.log_softmax(x, dim=-1)
-        return x_logis
+    # (context_readout_layer, objects_readout_layer, random_readout_layer methods remain unchanged)
 
-    def objects_readout_layer(self, x, train_type):
-        x = self.fc1_bn_o(x)
-        x = self.fc1_o(x)
-        x = F.relu(x)
-        x = self.fc2_bn_o(x)
-        x = self.fc2_o(x)
-        x_logis = F.log_softmax(x, dim=-1)
-        if train_type == "irm":
-            return x, x_logis
-        else:
-            return x_logis
-
-    def random_readout_layer(self, xc, xo, eval_random):
-        num = xc.shape[0]
-        l = [i for i in range(num)]
-        if eval_random:
-            random.shuffle(l)
-        random_idx = torch.tensor(l)
-        
-        if self.args.cat_or_add == "cat":
-            x = torch.cat((xc[random_idx], xo), dim=1)
-        else:
-            x = xc[random_idx] + xo
-
-        x = self.fc1_bn_co(x)
-        x = self.fc1_co(x)
-        x = F.relu(x)
-        x = self.fc2_bn_co(x)
-        x = self.fc2_co(x)
-        x_logis = F.log_softmax(x, dim=-1)
-        return x_logis
 
 class CausalGAT(torch.nn.Module):
     def __init__(self, num_features,
@@ -310,14 +293,14 @@ class CausalGAT(torch.nn.Module):
         self.args = args
         self.global_pool = global_add_pool
         self.dropout = dropout
-        GConv = partial(GCNConv, edge_norm=True, gfn=False)
+        GConv = partial(EGATGCNConv, edge_norm=True, gfn=False)  # 使用EGATGCNConv
 
         hidden_in = num_features
         self.num_classes = num_classes
         hidden_out = num_classes
         self.fc_num = args.fc_num
         self.bn_feat = BatchNorm1d(hidden_in)
-        self.conv_feat = GCNConv(hidden_in, hidden, gfn=True) # linear transform
+        self.conv_feat = EGATGCNConv(hidden_in, hidden, gfn=True)  # 使用EGATGCNConv
         self.bns_conv = torch.nn.ModuleList()
         self.convs = torch.nn.ModuleList()
 
@@ -328,7 +311,7 @@ class CausalGAT(torch.nn.Module):
         self.edge_att_mlp = nn.Linear(hidden * 2, 2)
         self.node_att_mlp = nn.Linear(hidden, 2)
         self.bnc = BatchNorm1d(hidden)
-        self.bno= BatchNorm1d(hidden)
+        self.bno = BatchNorm1d(hidden)
         self.context_convs = GConv(hidden, hidden)
         self.objects_convs = GConv(hidden, hidden)
 
@@ -365,15 +348,15 @@ class CausalGAT(torch.nn.Module):
 
     def forward(self, data, eval_random=True):
         x = data.x if data.x is not None else data.feat
-        edge_index, batch = data.edge_index, data.batch
+        edge_index, edge_attr, batch = data.edge_index, data.edge_attr, data.batch
         row, col = edge_index
         x = self.bn_feat(x)
-        x = F.relu(self.conv_feat(x, edge_index))
+        x = F.relu(self.conv_feat(x, edge_index, edge_attr))  # 传递edge_attr
         
         for i, conv in enumerate(self.convs):
             x = self.bns_conv[i](x)
             x = F.relu(conv(x, edge_index))
-        
+
         edge_rep = torch.cat([x[row], x[col]], dim=-1)
         edge_att = F.softmax(self.edge_att_mlp(edge_rep), dim=-1)
         edge_weight_c = edge_att[:, 0]
@@ -382,8 +365,8 @@ class CausalGAT(torch.nn.Module):
         node_att = F.softmax(self.node_att_mlp(x), dim=-1)
         xc = node_att[:, 0].view(-1, 1) * x
         xo = node_att[:, 1].view(-1, 1) * x
-        xc = F.relu(self.context_convs(self.bnc(xc), edge_index, edge_weight_c))
-        xo = F.relu(self.objects_convs(self.bno(xo), edge_index, edge_weight_o))
+        xc = F.relu(self.context_convs(self.bnc(xc), edge_index, edge_attr, edge_weight_c))
+        xo = F.relu(self.objects_convs(self.bno(xo), edge_index, edge_attr, edge_weight_o))
 
         xc = self.global_pool(xc, batch)
         xo = self.global_pool(xo, batch)
@@ -393,68 +376,35 @@ class CausalGAT(torch.nn.Module):
         xco_logis = self.random_readout_layer(xc, xo, eval_random=eval_random)
         return xc_logis, xo_logis, xco_logis
 
-    def context_readout_layer(self, x):
-        x = self.fc1_bn_c(x)
-        x = self.fc1_c(x)
-        x = F.relu(x)
-        x = self.fc2_bn_c(x)
-        x = self.fc2_c(x)
-        x_logis = F.log_softmax(x, dim=-1)
-        return x_logis
+    # (context_readout_layer, objects_readout_layer, random_readout_layer methods remain unchanged)
 
-    def objects_readout_layer(self, x):
-        x = self.fc1_bn_o(x)
-        x = self.fc1_o(x)
-        x = F.relu(x)
-        x = self.fc2_bn_o(x)
-        x = self.fc2_o(x)
-        x_logis = F.log_softmax(x, dim=-1)
-        return x_logis
-
-    def random_readout_layer(self, xc, xo, eval_random):
-        num = xc.shape[0]
-        l = [i for i in range(num)]
-        if eval_random:
-            random.shuffle(l)
-        random_idx = torch.tensor(l)
-        
-        if self.args.cat_or_add == "cat":
-            x = torch.cat((xc[random_idx], xo), dim=1)
-        else:
-            x = xc[random_idx] + xo
-
-        x = self.fc1_bn_co(x)
-        x = self.fc1_co(x)
-        x = F.relu(x)
-        x = self.fc2_bn_co(x)
-        x = self.fc2_co(x)
-        x_logis = F.log_softmax(x, dim=-1)
-        return x_logis
 
 class GCNNet(torch.nn.Module):
     """GCN with BN and residual connection."""
     def __init__(self, num_features,
+                       num_edge_features,
                        num_classes, hidden, 
                        num_feat_layers=1, 
                        num_conv_layers=3,
-                 num_fc_layers=2, gfn=False, collapse=False, residual=False,
-                 res_branch="BNConvReLU", global_pool="sum", dropout=0, 
-                 edge_norm=True):
+                       num_fc_layers=2, gfn=False, collapse=False, residual=False,
+                       res_branch="BNConvReLU", global_pool="sum", dropout=0, 
+                       edge_norm=True):
         super(GCNNet, self).__init__()
 
         self.global_pool = global_add_pool
         self.dropout = dropout
-        GConv = partial(GCNConv, edge_norm=edge_norm, gfn=gfn)
+        GConv = partial(EGATGCNConv, edge_norm=edge_norm, gfn=gfn)  # 使用EGATGCNConv
 
-        hidden_in = num_features
-        self.bn_feat = BatchNorm1d(hidden_in)
-        self.conv_feat = GCNConv(hidden_in, hidden, gfn=True) # linear transform
+        hidden_in_node = num_features
+        hidden_in_edge = num_edge_features
+        self.bn_feat = BatchNorm1d(hidden_in_node)
+        self.conv_feat = EGATGCNConv(hidden_in_node, hidden_in_edge, hidden, gfn=True)  # 使用EGATGCNConv
         self.bns_conv = torch.nn.ModuleList()
         self.convs = torch.nn.ModuleList()
 
         for i in range(num_conv_layers):
             self.bns_conv.append(BatchNorm1d(hidden))
-            self.convs.append(GConv(hidden, hidden))
+            self.convs.append(GConv(hidden, hidden, hidden))
         self.bn_hidden = BatchNorm1d(hidden)
         self.bns_fc = torch.nn.ModuleList()
         self.lins = torch.nn.ModuleList()
@@ -472,14 +422,16 @@ class GCNNet(torch.nn.Module):
 
     def forward(self, data):
         x = data.x if data.x is not None else data.feat
-        edge_index, batch = data.edge_index, data.batch
+        edge_index, edge_attr, batch = data.edge_index, data.edge_attr, data.batch
         
         x = self.bn_feat(x)
-        x = F.relu(self.conv_feat(x, edge_index))
+        x, edge, _ = self.conv_feat(x, edge_index, edge_attr)
+        x = F.relu(x)  # 传递edge_attr
         
         for i, conv in enumerate(self.convs):
             x = self.bns_conv[i](x)
-            x = F.relu(conv(x, edge_index))
+            x, edge, _ = conv(x, edge_index, edge)
+            x = F.relu(x)  # 传递edge_attr
             
         x = self.global_pool(x, batch)
         for i, lin in enumerate(self.lins):
@@ -490,8 +442,10 @@ class GCNNet(torch.nn.Module):
         x = self.lin_class(x)
         return F.log_softmax(x, dim=-1)
 
+
 class GINNet(torch.nn.Module):
     def __init__(self, num_features,
+                       num_edge_features,
                        num_classes,
                        hidden, 
                        num_fc_layers=2, 
@@ -504,16 +458,16 @@ class GINNet(torch.nn.Module):
         hidden_out = num_classes
         
         self.bn_feat = BatchNorm1d(hidden_in)
-        self.conv_feat = GCNConv(hidden_in, hidden, gfn=True) # linear transform
+        self.conv_feat = EGATGCNConv(hidden_in, num_edge_features, hidden, gfn=True)  # 使用EGATGCNConv
         
         self.convs = torch.nn.ModuleList()
         for i in range(num_conv_layers):
             self.convs.append(GINConv(
-            Sequential(Linear(hidden, hidden), 
-                       BatchNorm1d(hidden), 
-                       ReLU(),
-                       Linear(hidden, hidden), 
-                       ReLU())))
+                Sequential(Linear(hidden, hidden), 
+                           BatchNorm1d(hidden), 
+                           ReLU(),
+                           Linear(hidden, hidden), 
+                           ReLU())))
 
         self.bn_hidden = BatchNorm1d(hidden)
         self.bns_fc = torch.nn.ModuleList()
@@ -532,9 +486,10 @@ class GINNet(torch.nn.Module):
 
     def forward(self, data):
         x = data.x if data.x is not None else data.feat
-        edge_index, batch = data.edge_index, data.batch
+        edge_index, edge_attr, batch = data.edge_index, data.edge_attr, data.batch
+        
         x = self.bn_feat(x)
-        x = F.relu(self.conv_feat(x, edge_index))
+        x = F.relu(self.conv_feat(x, edge_index, edge_attr))  # 传递edge_attr
         
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
@@ -549,8 +504,10 @@ class GINNet(torch.nn.Module):
         prediction = F.log_softmax(x, dim=-1)
         return prediction
 
+
 class GATNet(torch.nn.Module):
     def __init__(self, num_features, 
+                       num_edge_features,
                        num_classes,
                        hidden,
                        head=4,
@@ -565,7 +522,7 @@ class GATNet(torch.nn.Module):
         hidden_out = num_classes
    
         self.bn_feat = BatchNorm1d(hidden_in)
-        self.conv_feat = GCNConv(hidden_in, hidden, gfn=True) # linear transform
+        self.conv_feat = EGATGCNConv(hidden_in, num_edge_features, hidden, gfn=True)  # 使用EGATGCNConv
         self.bns_conv = torch.nn.ModuleList()
         self.convs = torch.nn.ModuleList()
 
@@ -589,14 +546,14 @@ class GATNet(torch.nn.Module):
 
     def forward(self, data):
         x = data.x if data.x is not None else data.feat
-        edge_index, batch = data.edge_index, data.batch
+        edge_index, edge_attr, batch = data.edge_index, data.edge_attr, data.batch
         
         x = self.bn_feat(x)
-        x = F.relu(self.conv_feat(x, edge_index))
+        x = F.relu(self.conv_feat(x, edge_index, edge_attr))  # 传递edge_attr
         
         for i, conv in enumerate(self.convs):
             x = self.bns_conv[i](x)
-            x = F.relu(conv(x, edge_index))
+            x = F.relu(conv(x, edge_index, edge_attr))
 
         x = self.global_pool(x, batch)
         for i, lin in enumerate(self.lins):

@@ -9,7 +9,7 @@ import pdb
 class TUDatasetExt(InMemoryDataset):
     
     url = 'https://ls11-www.cs.tu-dortmund.de/people/morris/graphkerneldatasets'
-    
+
     def __init__(self,
                  root,
                  name,
@@ -19,7 +19,6 @@ class TUDatasetExt(InMemoryDataset):
                  use_node_attr=False,
                  processed_filename='data.pt',
                  pruning_percent=0):
-        
         self.name = name
         self.pruning_percent = pruning_percent
         self.processed_filename = processed_filename
@@ -39,23 +38,20 @@ class TUDatasetExt(InMemoryDataset):
     def num_node_labels(self):
         if self.data.x is None:
             return 0
-
         for i in range(self.data.x.size(1)):
             if self.data.x[:, i:].sum().item() == self.data.x.size(0):
                 return self.data.x.size(1) - i
-
         return 0
 
     @property
     def num_node_attributes(self):
         if self.data.x is None:
             return 0
-
         return self.data.x.size(1) - self.num_node_labels
 
     @property
     def raw_file_names(self):
-        names = ['A', 'graph_indicator']
+        names = ['A', 'graph_indicator', 'graph_labels', 'node_labels']
         return ['{}_{}.txt'.format(self.name, name) for name in names]
 
     @property
@@ -80,7 +76,7 @@ class TUDatasetExt(InMemoryDataset):
         if self.pre_transform is not None:
             data_list = [self.get(idx) for idx in range(len(self))]
             data_list = [self.pre_transform(data) for data in data_list]
-            
+
         self.data, self.slices = self.collate(data_list)
         torch.save((self.data, self.slices), self.processed_paths[0])
 

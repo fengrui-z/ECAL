@@ -1,17 +1,14 @@
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
-from torch_geometric.data import DataLoader, DenseDataLoader as DenseLoader
+from torch_geometric.data import DataLoader
 from torch import tensor
 import torch_geometric.transforms as T
-from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
-import pdb
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import random
 import numpy as np
-from torch.autograd import grad
 from torch_geometric.data import Batch
 from utils import k_fold, num_graphs
-from tqdm import tqdm
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -23,16 +20,15 @@ def process_dataset(dataset):
     num_nodes = min(int(num_nodes / len(dataset) * 5), max_num_nodes)
     transform = T.ToDense(num_nodes)
     new_dataset = []
-
-    for data in tqdm(dataset):
+    
+    for data in dataset:
         data = transform(data)
-        add_zeros = num_nodes - data.x.shape[0]
+        add_zeros = num_nodes - data.feat.shape[0]
         if add_zeros:
-            dim = data.x.shape[1]
-            data.x = torch.cat((data.x, torch.zeros(add_zeros, dim)), dim=0)
+            dim = data.feat.shape[1]
+            data.feat = torch.cat((data.feat, torch.zeros(add_zeros, dim)), dim=0)
         new_dataset.append(data)
     return new_dataset
-
 
 def train_baseline_syn(train_set, val_set, test_set, model_func=None, args=None):
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True)

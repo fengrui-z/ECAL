@@ -19,14 +19,12 @@ class FeatureExpander(MessagePassing):
         edge_noises_add (float): adding random edges (in ratio of current edges).
         edge_noises_delete (float): remove random ratio of edges.
         group_degree (int): group nodes to create super nodes, set 0 to disable.
-        edge_features (bool): whether to use edge features.
     """
 
     def __init__(self, degree=True, onehot_maxdeg=0, AK=1,
                  centrality=False, remove_edges="none",
-                 edge_noises_add=0, edge_noises_delete=0, group_degree=0,
-                 edge_features=False):
-        super(FeatureExpander, self).__init__('add', 'source_to_target')
+                 edge_noises_add=0, edge_noises_delete=0, group_degree=0):
+        super(FeatureExpander, self).__init__('add')
         self.degree = degree
         self.onehot_maxdeg = onehot_maxdeg
         self.AK = AK
@@ -35,7 +33,6 @@ class FeatureExpander(MessagePassing):
         self.edge_noises_add = edge_noises_add
         self.edge_noises_delete = edge_noises_delete
         self.group_degree = group_degree
-        self.edge_features = edge_features
         assert remove_edges in ["none", "nonself", "all"], remove_edges
 
         self.edge_norm_diag = 1e-8  # edge norm is used, and set A diag to it
@@ -60,10 +57,6 @@ class FeatureExpander(MessagePassing):
         akx = self.compute_akx(data.num_nodes, data.x, data.edge_index)
         cent = self.compute_centrality(data)
         data.x = torch.cat([data.x, deg, deg_onehot, akx, cent], -1)
-
-        if self.edge_features and data.edge_attr is not None:
-            edge_feat = self.compute_edge_features(data.edge_index, data.edge_attr)
-            data.x = torch.cat([data.x, edge_feat], -1)
 
         if self.remove_edges != "none":
             if self.remove_edges == "all":
@@ -145,12 +138,6 @@ class FeatureExpander(MessagePassing):
             x = self.propagate(edge_index, x=x, norm=norm)
             xs.append(x)
         return torch.cat(xs, -1)
-
-    def compute_edge_features(self, edge_index, edge_attr):
-        # Aggregate edge features for each node
-        row, col = edge_index
-        edge_features = scatter_add(edge_attr, row, dim=0, dim_size=edge_attr.size(0))
-        return edge_features
 
     def message(self, x_j, norm):
         return norm.view(-1, 1) * x_j

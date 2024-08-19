@@ -1,7 +1,8 @@
 import os.path as osp
 import re
 import torch
-from torch_geometric.datasets import Planetoid, Twitch, WikipediaNetwork
+from torch_geometric.datasets import MNISTSuperpixels
+from torch_geometric.utils import degree
 import torch_geometric.transforms as T
 from feature_expansion import FeatureExpander
 from tu_dataset import TUDatasetExt
@@ -12,9 +13,7 @@ def get_dataset(name, sparse=True, feat_str="deg+ak3+reall", root=None, pruning_
         path = osp.join(osp.expanduser('~'), 'pyG_data', name)
     else:
         path = osp.join(root, name)
-    
-    # Feature extraction parameters
-    degree_flag = feat_str.find("deg") >= 0
+    degree = feat_str.find("deg") >= 0
     onehot_maxdeg = re.findall("odeg(\d+)", feat_str)
     onehot_maxdeg = int(onehot_maxdeg[0]) if onehot_maxdeg else None
     k = re.findall("an{0,1}k(\d+)", feat_str)
@@ -26,30 +25,36 @@ def get_dataset(name, sparse=True, feat_str="deg+ak3+reall", root=None, pruning_
     edge_noises_add = re.findall("randa([\d\.]+)", feat_str)
     edge_noises_add = float(edge_noises_add[0]) if edge_noises_add else 0
     edge_noises_delete = re.findall("randd([\d\.]+)", feat_str)
-    edge_noises_delete = float(edge_noises_delete[0]) if edge_noises_delete else 0
+    edge_noises_delete = float(
+        edge_noises_delete[0]) if edge_noises_delete else 0
     centrality = feat_str.find("cent") >= 0
     coord = feat_str.find("coord") >= 0
     
     pre_transform = FeatureExpander(
-        degree=degree_flag, onehot_maxdeg=onehot_maxdeg, AK=k,
+        degree=degree, onehot_maxdeg=onehot_maxdeg, AK=k,
         centrality=centrality, remove_edges=remove_edges,
         edge_noises_add=edge_noises_add, edge_noises_delete=edge_noises_delete,
         group_degree=groupd).transform
 
-    if name in ["Cora", "CiteSeer", "PubMed"]:
-        dataset = Planetoid(path, name, transform=T.NormalizeFeatures())
-    elif name.startswith("Twitch"):
-        dataset = Twitch(path, name.split("_")[1], transform=T.NormalizeFeatures())
-    elif name.startswith("Wikipedia"):
-        dataset = WikipediaNetwork(path, name.split("_")[1], transform=T.NormalizeFeatures())
-    else:
-        dataset = TUDatasetExt(
-            path, 
-            name, 
-            pre_transform=pre_transform,
-            use_node_attr=True, 
-            processed_filename="data_%s.pt" % feat_str, 
-            pruning_percent=pruning_percent)
-    
-    dataset.data.edge_attr = None
+    dataset = TUDatasetExt(
+        path, 
+        name, 
+        pre_transform=pre_transform,
+        use_node_attr=True, 
+        processed_filename="data_%s.pt" % feat_str, 
+        pruning_percent=pruning_percent)
+
+    # dataset.data.edge_attr = None
     return dataset
+
+
+
+def dataset_split(dataset):
+    
+    train_set = dataset['house'][:800] + dataset['cycle'][:800]
+    val_set = dataset['house'][800:900] + dataset['cycle'][800:900]
+    test_set = dataset['house'][900:] + dataset['cycle'][900:]
+    random.shuffle(train_set)
+    random.shuffle(val_set)
+    random.shuffle(test_set)
+    return train_set, val_set, test_set

@@ -27,13 +27,12 @@ def k_fold(dataset, folds, epoch_select):
         val_indices = [test_indices[i - 1] for i in range(folds)]
 
     for i in range(folds):
-        train_mask = torch.ones(len(dataset), dtype=torch.bool)
+        train_mask = torch.ones(len(dataset), dtype=torch.uint8)
         train_mask[test_indices[i].long()] = 0
         train_mask[val_indices[i].long()] = 0
-        train_indices.append(train_mask.nonzero(as_tuple=False).view(-1))
+        train_indices.append(train_mask.nonzero().view(-1))
     
     return train_indices, test_indices, val_indices
-
 
 def creat_one_pyg_graph(context, shape, label, feature_dim, shape_num, settings_dict, args=None):
     if args is None:
@@ -51,7 +50,7 @@ def creat_one_pyg_graph(context, shape, label, feature_dim, shape_num, settings_
                                             width_basis=settings_dict[context]["width_basis"],
                                             feature_generator=feature,
                                             m=settings_dict[context]["m"],
-                                            random_edges=noise) 
+                                            random_edges=noise)
     pyg_G = from_networkx(G)
     pyg_G.y = torch.tensor([label])
     return pyg_G, node_label
@@ -59,24 +58,20 @@ def creat_one_pyg_graph(context, shape, label, feature_dim, shape_num, settings_
 def graph_dataset_generate(args, save_path):
     class_list = ["house", "cycle", "grid", "diamond"]
     settings_dict = {"ba": {"width_basis": args.node_num ** 2, "m": 2},
-                     "tree": {"width_basis":2, "m": args.node_num}}
+                     "tree": {"width_basis": 2, "m": args.node_num}}
 
     feature_dim = args.feature_dim
     shape_num = args.shape_num
-    class_num = class_list.__len__()
-    dataset = {}
-    dataset['tree'] = {}
-    dataset['ba'] = {}
+    dataset = {"tree": {}, "ba": {}}
 
     for label, shape in enumerate(class_list):
-        tr_list = []
-        ba_list = []
+        tr_list, ba_list = [], []
         print("create shape:{}".format(shape))
-        for i in tqdm(range(args.data_num)):
-            tr_g, label1 = creat_one_pyg_graph(context="tree", shape=shape, label=label, feature_dim=feature_dim, 
-                                               shape_num=shape_num, settings_dict=settings_dict, args=args)
-            ba_g, label2 = creat_one_pyg_graph(context="ba", shape=shape, label=label, feature_dim=feature_dim, 
-                                               shape_num=shape_num, settings_dict=settings_dict, args=args)
+        for _ in tqdm(range(args.data_num)):
+            tr_g, _ = creat_one_pyg_graph(context="tree", shape=shape, label=label, feature_dim=feature_dim, 
+                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
+            ba_g, _ = creat_one_pyg_graph(context="ba", shape=shape, label=label, feature_dim=feature_dim, 
+                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
             tr_list.append(tr_g)
             ba_list.append(ba_g)
         dataset['tree'][shape] = tr_list
@@ -90,24 +85,20 @@ def graph_dataset_generate(args, save_path):
 def test_dataset_generate(args, save_path):
     class_list = ["house", "cycle", "grid", "diamond"]
     settings_dict = {"ba": {"width_basis": (args.node_num) ** 2, "m": 2},
-                     "tree": {"width_basis":2, "m": args.node_num}}
+                     "tree": {"width_basis": 2, "m": args.node_num}}
 
     feature_dim = args.feature_dim
     shape_num = args.shape_num
-    class_num = class_list.__len__()
-    dataset = {}
-    dataset['tree'] = {}
-    dataset['ba'] = {}
+    dataset = {"tree": {}, "ba": {}}
     data_num = int(0.2 * args.data_num)
     for label, shape in enumerate(class_list):
-        tr_list = []
-        ba_list = []
+        tr_list, ba_list = [], []
         print("test set create shape:{}".format(shape))
-        for i in tqdm(range(data_num)):
-            tr_g, label1 = creat_one_pyg_graph(context="tree", shape=shape, label=label, feature_dim=feature_dim, 
-                                               shape_num=shape_num, settings_dict=settings_dict, args=args)
-            ba_g, label2 = creat_one_pyg_graph(context="ba", shape=shape, label=label, feature_dim=feature_dim, 
-                                               shape_num=shape_num, settings_dict=settings_dict, args=args)
+        for _ in tqdm(range(data_num)):
+            tr_g, _ = creat_one_pyg_graph(context="tree", shape=shape, label=label, feature_dim=feature_dim, 
+                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
+            ba_g, _ = creat_one_pyg_graph(context="ba", shape=shape, label=label, feature_dim=feature_dim, 
+                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
             tr_list.append(tr_g)
             ba_list.append(ba_g)
         dataset['tree'][shape] = tr_list
@@ -128,6 +119,7 @@ def dataset_bias_split(dataset, args, bias=None, split=None, total=20000):
     train_split, val_split, test_split = float(split[0]) / 10, float(split[1]) / 10, float(split[2]) / 10
     assert train_split + val_split + test_split == 1
     train_num, val_num, test_num = total * train_split, total * val_split, total * test_split
+    # balance class
     class_num = args.num_classes
     train_class_num, val_class_num, test_class_num = train_num / class_num, val_num / class_num, test_num / class_num
     train_list, val_list, test_list  = [], [], []
@@ -146,8 +138,8 @@ def dataset_bias_split(dataset, args, bias=None, split=None, total=20000):
         test_list += tr_dataset[shape][train_tr_num + val_tr_num:train_tr_num + val_tr_num + test_tr_num] + ba_dataset[shape][train_ba_num + val_ba_num:train_ba_num + val_ba_num + test_ba_num]
         _, e1 = print_graph_info(tr_dataset[shape][0], "Tree", shape)
         _, e2 = print_graph_info(ba_dataset[shape][0], "BA", shape)
-        
         edges_num += e1 + e2
+
     random.shuffle(train_list)
     random.shuffle(val_list)
     random.shuffle(test_list)
