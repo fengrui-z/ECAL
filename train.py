@@ -1,3 +1,7 @@
+import os
+import csv
+import json 
+from datetime import datetime
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -30,6 +34,7 @@ def process_dataset(dataset):
         new_dataset.append(data)
     return new_dataset
 
+
 def train_baseline_syn(train_set, val_set, test_set, model_func=None, args=None):
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True)
     val_loader = DataLoader(val_set, args.batch_size, shuffle=False)
@@ -37,42 +42,82 @@ def train_baseline_syn(train_set, val_set, test_set, model_func=None, args=None)
 
     if args.feature_dim == -1:
         args.feature_dim = args.max_degree
-    model = model_func(args.feature_dim, args.num_classes).to(device)
+    model = model_func(train_set.num_features, train_set.num_edge_features, train_set.num_classes).to(device)
+    
     optimizer = Adam(model.parameters(), lr=args.lr)
-
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr, last_epoch=-1, verbose=False)
     best_val_acc, update_test_acc, update_train_acc, update_epoch = 0, 0, 0, 0
     
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train(model, optimizer, train_loader, device, args)
-        val_acc = eval_acc(model, val_loader, device, args)
-        test_acc = eval_acc(model, test_loader, device, args)
-        lr_scheduler.step()
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            update_test_acc = test_acc
-            update_train_acc = train_acc
-            update_epoch = epoch
-     
-        print("BIAS:[{:.2f}] | Model:[{}] Epoch:[{}/{}] Loss:[{:.4f}] Train:[{:.2f}] val:[{:.2f}] Test:[{:.2f}] | Best Val:[{:.2f}] Update Test:[{:.2f}] at Epoch:[{}] | lr:{:.6f}"
-                .format(args.bias,
-                        args.model,
-                        epoch, 
-                        args.epochs,
-                        train_loss, 
-                        train_acc * 100, 
-                        val_acc * 100,
-                        test_acc * 100, 
-                        best_val_acc * 100,
-                        update_test_acc * 100, 
-                        update_epoch,
-                        optimizer.param_groups[0]['lr']))
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    exp_folder = os.path.join('exp', f'{args.model}_{args.dataset}_{args.spliting}_{timestamp}')
+    os.makedirs(exp_folder, exist_ok=True)
+    
+    train_log_path = os.path.join(exp_folder, 'train_results.csv')
+    val_log_path = os.path.join(exp_folder, 'val_results.csv')
+    test_log_path = os.path.join(exp_folder, 'test_results.csv')
 
-    print("syd: BIAS:[{:.2f}] | Best Val acc:[{:.2f}] Test acc:[{:.2f}] at epoch:[{}]"
-        .format(args.bias,
-                best_val_acc * 100, 
+    with open(train_log_path, 'w', newline='') as train_file, \
+         open(val_log_path, 'w', newline='') as val_file, \
+         open(test_log_path, 'w', newline='') as test_file:
+
+        train_writer = csv.writer(train_file)
+        val_writer = csv.writer(val_file)
+        test_writer = csv.writer(test_file)
+
+        train_writer.writerow(['Epoch', 'Train Loss', 'Train Acc'])
+        val_writer.writerow(['Epoch', 'Val Acc'])
+        test_writer.writerow(['Epoch', 'Test Acc'])
+
+        for epoch in range(1, args.epochs + 1):
+            train_loss, train_acc = train(model, optimizer, train_loader, device, args)
+            val_acc = eval_acc(model, val_loader, device, args)
+            test_acc = eval_acc(model, test_loader, device, args)
+            lr_scheduler.step()
+            
+            train_writer.writerow([epoch, train_loss, train_acc])
+            val_writer.writerow([epoch, val_acc])
+            test_writer.writerow([epoch, test_acc])
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                update_test_acc = test_acc
+                update_train_acc = train_acc
+                update_epoch = epoch
+
+            print("Model:[{}] Epoch:[{}/{}] Loss:[{:.4f}] Train:[{:.2f}] val:[{:.2f}] Test:[{:.2f}] | Best Val:[{:.2f}] Update Test:[{:.2f}] at Epoch:[{}] | lr:{:.6f}"
+                    .format(args.model,
+                            epoch, 
+                            args.epochs,
+                            train_loss, 
+                            train_acc * 100, 
+                            val_acc * 100,
+                            test_acc * 100, 
+                            best_val_acc * 100,
+                            update_test_acc * 100, 
+                            update_epoch,
+                            optimizer.param_groups[0]['lr']))
+
+    print("Best Val acc:[{:.2f}] Test acc:[{:.2f}] at epoch:[{}]"
+        .format(best_val_acc * 100, 
                 update_test_acc * 100,
                 update_epoch))
+    
+    log_data = {
+        'model': args.model,
+        'dataset': args.dataset,
+        'spliting': args.spliting,
+        'ablation': args.ablation,
+        'swap_prob': args.swap_prob,
+        'scale_factor': args.scale_factor,
+        'edge_replace_rate': args.replace,
+        'bias': args.bias,
+        "best_val_acc": best_val_acc,
+        "update_test_acc": update_test_acc,
+        "update_epoch": update_epoch
+    }
+
+    with open(os.path.join(exp_folder, 'log.json'), 'w') as f:
+        json.dump(log_data, f, indent=4)
 
 def num_graphs(data):
     if data.batch is not None:
@@ -92,6 +137,7 @@ def train(model, optimizer, loader, device, args):
         out = model(data)
         loss = F.nll_loss(out, data.y.view(-1))
         pred = out.max(1)[1]
+        # print('pre',pred)
         correct += pred.eq(data.y.view(-1)).sum().item()
         loss.backward()
         total_loss += loss.item() * num_graphs(data)

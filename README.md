@@ -1,58 +1,79 @@
-# Causal Attention for Interpretable and Generalizable Graph Classification
-PyTorch implementation for Causal Attention for Interpretable and Generalizable Graph Classification
-
-Yongduo Sui, Xiang Wang, Jiancan Wu, Min Lin, Xiangnan He, Tat-Seng Chua
-
-In KDD 2022: https://dl.acm.org/doi/abs/10.1145/3534678.3539366
+# Catch Causal Signals from Edges for Label Imbalance in Graph Classification [ICASSP2025]
 
 
+This repository contains the implementation of our proposed **Edge-Enhanced Causal Attention Learning (ECAL)** framework, which effectively incorporates edge features into causal attention mechanisms to tackle **label imbalance** in graph classification tasks. Our method disentangles causal subgraphs from original graphs and reshapes graph representations using edge features, leading to improved performance on real-world datasets.
 
-## Overview 
+---
 
-In this work, we take a causal look at the GNN modeling for graph classification. With our causal assumption, the shortcut feature serves as a confounder between the causal feature and prediction. It tricks the classifier to learn spurious correlations that facilitate the prediction in in-distribution (ID) test evaluation, while causing the performance drop in out-of-distribution (OOD) test data. To endow the classifier with better generalization, we propose the Causal Attention Learning (CAL) strategy, which discovers the causal patterns and mitigates the confounding effect of shortcuts. Specifically, we employ attention modules to estimate the causal and shortcut features of the input graph. We then parameterize the backdoor adjustment of causal theory — combine each causal feature with various shortcut features. It encourages the stable relationships between the causal estimation and the prediction, regardless of the changes in shortcut parts and distributions.
+## Table of Contents
+- [Catch Causal Signals from Edges for Label Imbalance in Graph Classification \[ICASSP2025\]](#catch-causal-signals-from-edges-for-label-imbalance-in-graph-classification-icassp2025)
+  - [Table of Contents](#table-of-contents)
+  - [Introduction](#introduction)
+  - [Dependencies](#dependencies)
+  - [A quick training example is](#a-quick-training-example-is)
+  - [Handling Label Imbalance](#handling-label-imbalance)
+  - [Citation](#citation)
+
+---
+
+## Introduction
+
+Graph neural networks (GNNs) have achieved significant success in graph classification tasks. However, real-world datasets often face **label imbalance**, making it challenging for models to generalize effectively. While causal discovery and causal attention mechanisms have been proposed to address this, most existing methods **overlook the importance of edge features** in graphs.
+
+In this work, we propose **ECAL**, a framework that enhances causal attention mechanisms by incorporating edge features:
+- **Edge-Featured Graph Attention Networks (EGAT)** modules are used to capture causal signals from edges.
+- The framework splits graphs into **causal** and **trivial** subgraphs and reshapes representations to improve classification performance under label imbalance.
+- Extensive experiments demonstrate the effectiveness of ECAL on benchmark datasets.
+
+---
 
 
 ## Dependencies
 
+Ensure the following dependencies are installed:
 
-Please setup the environment following Requirements in this [repository](https://github.com/chentingpc/gfn#requirements).
-Typically, you might need to run the following commands:
+- Python >= 3.8
+- PyTorch >= 1.10
+- torch_geometric
+
+Install all required packages using:
+
+```bash
+pip install -r requirements.txt
 ```
-pip install torch==1.4.0
-pip install torch-scatter==1.1.0 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-sparse==0.4.4 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-cluster==1.4.5 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-spline-conv==1.1.0 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-geometric==1.1.0
-pip install torch-vision==0.5.0
+
+---
+
+## A quick training example is
+
+```bash
+python main_real.py --model ECALv2 --dataset PTC_MM --epochs 200
+
 ```
 
+---
 
-## Experiments
+## Handling Label Imbalance
 
-### For Synthetic datasets
+We provide methods to create imbalanced datasets for graph classification. These methods allow users to simulate real-world scenarios where certain classes are underrepresented. For datasets with label imbalance, set the argument **--spliting** to label to configure the model for imbalanced data. For example:
+
+```bash
+python main_real.py --model GCN --dataset PTC_MM --epochs 200 --spliting label --scale_factor 2 --swap_prob 0.2
 ```
-model=CausalGCN
-lr=0.002
-b=0.9
-min=5e-6
-python main_syn.py --bias $b --lr $lr --min_lr $min --model $model 
-```
-### For TU datasets
+Here,
+- **--swap_prob** controls the proportion of data swapped between train/test sets.
+- **--scale_factor** limits the maximum ratio of train set size to test set size.
 
-```python main_real.py --model CausalGAT --dataset MUTAG```
-
-## Acknowledgements
-
-The backbone implementation is reference to [https://github.com/chentingpc/gfn](https://github.com/chentingpc/gfn).
-
+---
 ## Citation
-If you use our codes or checkpoints, please cite our paper:
-```
-@inproceedings{sui2022causal,
-  title={Causal Attention for Interpretable and Generalizable Graph Classification},
-  author={Sui, Yongduo and Wang, Xiang and Wu, Jiancan and Lin, Min and He, Xiangnan and Chua, Tat-Seng},
-  booktitle={KDD},
-  year={2022}
+```bash
+@inproceedings{zhang2025ecal,
+  title={Catch Causal Signals from Edges for Label Imbalance in Graph Classification},
+  author={Fengrui Zhang and Yujia Yin and Hongzong Li and Yifan Chen and Tianyi Qu},
+  booktitle={Proceedings of the 2025 IEEE International Conference on Acoustics, Speech, and Signal Processing (ICASSP)},
+  year={2025},
+  publisher={IEEE}
 }
 ```
+
+For any questions or issues, please contact yifanc@hkbu.edu.hk or qutianyi@sf-express.com.

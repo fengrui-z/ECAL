@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 
-# 定义 MLP 模块
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, layers, dropout=0.):
         super(MLP, self).__init__()
@@ -27,10 +26,10 @@ class MLP(nn.Module):
                 x = F.dropout(x, p=self.dropout, training=self.training)
         return x
 
-# 定义 EGAT 模块
+
 class EGAT(MessagePassing):
     def __init__(self, in_node_features, in_edge_features, out_features, heads=3, layers=3, bias=True, 
-                 return_attn_weights=True, use_attention_weights=True, negative_slope=0.2, dropout=0., **kwargs):
+                 return_attn_weights=True, use_attention_weights=True, negative_slope=0.2, dropout=0.1, **kwargs):
         super(EGAT, self).__init__(node_dim=0, **kwargs)
 
         self.in_node_features = in_node_features
@@ -42,20 +41,20 @@ class EGAT(MessagePassing):
         self.negative_slope = negative_slope
         self.dropout = dropout
         
-        # 节点和边特征的线性变换层
+        
         self.node_transform = nn.Linear(in_node_features, out_features, bias=True)
         self.edge_transform = nn.Linear(in_edge_features, out_features, bias=True)
         self.node_transform_i = nn.Linear(in_node_features, heads * out_features, bias=False)
         self.node_transform_j = nn.Linear(in_node_features, heads * out_features, bias=False)
         self.edge_transform_ij = nn.Linear(in_edge_features, heads * out_features, bias=False)
 
-        # 注意力 MLP
+        
         self.attn_mlp = MLP(3 * heads * out_features, heads * out_features, heads * out_features, layers)
 
-        # 注意力参数
+        
         self.attn_param = Parameter(torch.FloatTensor(size=(1, heads, out_features)))
 
-        # MLP for compressing multi-head features
+       
         self.node_mlp = MLP(heads * out_features, out_features, out_features, layers)
         self.edge_mlp = MLP(heads * out_features, out_features, out_features, layers)
 
@@ -106,7 +105,7 @@ class EGAT(MessagePassing):
             attention_scores = f_ij.sum(dim=-1).unsqueeze(-1)
             
         alpha = pyg_utils.softmax(attention_scores, index, ptr, size_i)  # Normalized attention weights
-        # alpha = F.dropout(alpha, p=self.dropout)
+        alpha = F.dropout(alpha, p=self.dropout)
         
         # self.attn_weights = alpha  # shape [E, H, 1]
         self.attn_weights = self.linear(alpha.squeeze(-1)).view(-1)  # shape [E]
@@ -117,7 +116,7 @@ class EGAT(MessagePassing):
         return scatter_add(inputs, index, dim=self.node_dim, dim_size=dim_size)
 
 
-# GCNConv 定义
+
 class GCNConv(MessagePassing):
     def __init__(self, in_channels, out_channels, improved=False, cached=False, bias=True, edge_norm=True, gfn=False):
         super(GCNConv, self).__init__('add')
@@ -147,7 +146,7 @@ class GCNConv(MessagePassing):
     def norm(edge_index, num_nodes, edge_weight, improved=False, dtype=None):
         if edge_weight is None:
             edge_weight = torch.ones((edge_index.size(1),), dtype=dtype, device=edge_index.device)
-        
+
         edge_weight = edge_weight.view(-1)
         assert edge_weight.size(0) == edge_index.size(1)
         
@@ -158,9 +157,14 @@ class GCNConv(MessagePassing):
         edge_weight = torch.cat([edge_weight, loop_weight], dim=0)
 
         row, col = edge_index
+
         deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
+
+        if torch.any(deg < 0):
+            print("There are negative values in deg.")
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+
         
         return edge_index, deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
 
@@ -168,6 +172,8 @@ class GCNConv(MessagePassing):
         x = torch.matmul(x, self.weight)
         if self.gfn:
             return x
+        # if torch.isnan(x).any():
+            # print('before x has NaN')
 
         if not self.cached or self.cached_result is None:
             if self.edge_norm:
@@ -177,6 +183,9 @@ class GCNConv(MessagePassing):
             self.cached_result = edge_index, norm
 
         edge_index, norm = self.cached_result
+        # if torch.isnan(norm).any():
+            # print('after norm has NaN')
+        out = self.propagate(edge_index, x=x, norm=norm)
         return self.propagate(edge_index, x=x, norm=norm)
 
     def message(self, x_j, norm):
@@ -193,7 +202,7 @@ class GCNConv(MessagePassing):
     def __repr__(self):
         return '{}({}, {})'.format(self.__class__.__name__, self.in_channels, self.out_channels)
     
-# 定义整合 EGAT 和 GCNConv 的模块
+
 class EGATGCNConv(nn.Module):
     def __init__(self, in_node_features, in_edge_features, out_features, heads=3, layers=3, edge_norm=True, gfn=False):
         super(EGATGCNConv, self).__init__()
@@ -201,9 +210,11 @@ class EGATGCNConv(nn.Module):
         self.gcn = GCNConv(out_features, out_features, edge_norm=edge_norm, gfn=gfn)
 
     def forward(self, node_features, edge_index, edge_features, edge_weight=None):
-        # 通过 EGAT 模块获取节点和边的特征
-        node_out, edge_out, attn_weights = self.egat(node_features, edge_index, edge_features)
         
-        # 使用 GCN 进行图卷积
+        node_out, edge_out, attn_weights = self.egat(node_features, edge_index, edge_features)
+
+        
         out = self.gcn(node_out, edge_index, edge_weight=edge_weight)
+        # if torch.isnan(out).any():
+            # print('node_out has NaN')
         return out, edge_out, attn_weights

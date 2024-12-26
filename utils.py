@@ -1,5 +1,3 @@
-import featgen
-import gengraph
 import random
 from torch_geometric.utils import from_networkx
 from tqdm import tqdm
@@ -8,6 +6,9 @@ import torch
 from torch_geometric.utils.convert import to_networkx
 from sklearn.model_selection import StratifiedKFold
 import pdb
+import torch
+from sklearn.model_selection import train_test_split
+from torch_geometric.data import Data, Dataset
 
 def num_graphs(data):
     if data.batch is not None:
@@ -34,159 +35,284 @@ def k_fold(dataset, folds, epoch_select):
     
     return train_indices, test_indices, val_indices
 
-def creat_one_pyg_graph(context, shape, label, feature_dim, shape_num, settings_dict, args=None):
-    if args is None:
-        noise = 0
+
+def process_labels(data_y):
+    # new_data_list = []
+    labels = data_y[:, :3]
+    if torch.isnan(labels).any():
+        data_y = torch.full_like(data_y[:, :1], float('nan'))
+        # print('data.y', data.y)
     else:
-        noise = args.noise
-    if feature_dim == -1:
-        # use degree as feature
-        feature = featgen.ConstFeatureGen(None, max_degree=args.max_degree)
-    else:
-        feature = featgen.ConstFeatureGen(np.random.uniform(0, 1, feature_dim))
-    G, node_label = gengraph.generate_graph(basis_type=context,
-                                            shape=shape,
-                                            nb_shapes=shape_num,
-                                            width_basis=settings_dict[context]["width_basis"],
-                                            feature_generator=feature,
-                                            m=settings_dict[context]["m"],
-                                            random_edges=noise)
-    pyg_G = from_networkx(G)
-    pyg_G.y = torch.tensor([label])
-    return pyg_G, node_label
-
-def graph_dataset_generate(args, save_path):
-    class_list = ["house", "cycle", "grid", "diamond"]
-    settings_dict = {"ba": {"width_basis": args.node_num ** 2, "m": 2},
-                     "tree": {"width_basis": 2, "m": args.node_num}}
-
-    feature_dim = args.feature_dim
-    shape_num = args.shape_num
-    dataset = {"tree": {}, "ba": {}}
-
-    for label, shape in enumerate(class_list):
-        tr_list, ba_list = [], []
-        print("create shape:{}".format(shape))
-        for _ in tqdm(range(args.data_num)):
-            tr_g, _ = creat_one_pyg_graph(context="tree", shape=shape, label=label, feature_dim=feature_dim, 
-                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
-            ba_g, _ = creat_one_pyg_graph(context="ba", shape=shape, label=label, feature_dim=feature_dim, 
-                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
-            tr_list.append(tr_g)
-            ba_list.append(ba_g)
-        dataset['tree'][shape] = tr_list
-        dataset['ba'][shape] = ba_list
-
-    save_path += "/syn_dataset.pt"
-    torch.save(dataset, save_path)
-    print("save at:{}".format(save_path))
-    return dataset
-
-def test_dataset_generate(args, save_path):
-    class_list = ["house", "cycle", "grid", "diamond"]
-    settings_dict = {"ba": {"width_basis": (args.node_num) ** 2, "m": 2},
-                     "tree": {"width_basis": 2, "m": args.node_num}}
-
-    feature_dim = args.feature_dim
-    shape_num = args.shape_num
-    dataset = {"tree": {}, "ba": {}}
-    data_num = int(0.2 * args.data_num)
-    for label, shape in enumerate(class_list):
-        tr_list, ba_list = [], []
-        print("test set create shape:{}".format(shape))
-        for _ in tqdm(range(data_num)):
-            tr_g, _ = creat_one_pyg_graph(context="tree", shape=shape, label=label, feature_dim=feature_dim, 
-                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
-            ba_g, _ = creat_one_pyg_graph(context="ba", shape=shape, label=label, feature_dim=feature_dim, 
-                                          shape_num=shape_num, settings_dict=settings_dict, args=args)
-            tr_list.append(tr_g)
-            ba_list.append(ba_g)
-        dataset['tree'][shape] = tr_list
-        dataset['ba'][shape] = ba_list
-
-    save_path += "/syn_dataset_test.pt"
-    torch.save(dataset, save_path)
-    print("save at:{}".format(save_path))
-    return dataset
-
-def dataset_bias_split(dataset, args, bias=None, split=None, total=20000):
-    class_list = ["house", "cycle", "grid", "diamond"]
-    bias_dict = {"house": bias, "cycle": 1 - bias, "grid": 1 - bias, "diamond": 1 - bias}
+        mask = ~torch.isnan(labels).any(dim=1)
+        valid_labels = labels[mask]
+        valid_labels = valid_labels.to(torch.int64)
+        
+        class_indices = (valid_labels[:, 0] * 4 + valid_labels[:, 1] * 2 + valid_labels[:, 2]).long()
+        data_y = class_indices.unsqueeze(1)
+        # print('data.y', data.y)
+        
+        # new_data_list.append(data)
+    # new_dataset = dataset.__class__(new_data_list)
     
-    ba_dataset = dataset['ba']
-    tr_dataset = dataset['tree']
+    return data_y
+
+def compute_node_feature_variances(dataset, k):
+    all_variances = []
+
+    for data in dataset:
+        # x: [num_nodes, num_features]
+        x = data.x
+        x = x.float()
+        variances = torch.var(x, dim=0)
+        all_variances.append(variances)
+
+    global_variances = torch.mean(torch.stack(all_variances), dim=0)
+    _, top_k_indices = torch.topk(global_variances, k)
+    # print('top_k_indices', top_k_indices)
+
+    return top_k_indices
+
+
+
+def split_dataset_ood_edge(dataset, edge_type, threshold=0.25, swap_prob=0., target_ratio=0.8):
+    train_graphs, test_graphs = [], []
+
+    for graph_idx in range(len(dataset)):
+        edge_attr = dataset[graph_idx].edge_attr
+        total_edges = edge_attr.size(0)
+
+        if total_edges == 0:
+            train_graphs.append(graph_idx)
+        else:
+            edge_type_ratio = (edge_attr [:, edge_type] == 1).float().mean().item()
+            # print('edge_type_ratio', edge_type_ratio)
+        
+            if edge_type_ratio < threshold:
+                train_graphs.append(graph_idx)
+            else:
+                test_graphs.append(graph_idx)
+
+    train_size = len(train_graphs)
+    test_size = len(test_graphs)
     
-    train_split, val_split, test_split = float(split[0]) / 10, float(split[1]) / 10, float(split[2]) / 10
-    assert train_split + val_split + test_split == 1
-    train_num, val_num, test_num = total * train_split, total * val_split, total * test_split
-    # balance class
-    class_num = args.num_classes
-    train_class_num, val_class_num, test_class_num = train_num / class_num, val_num / class_num, test_num / class_num
-    train_list, val_list, test_list  = [], [], []
-    edges_num = 0
+    total_size = len(dataset)
+    target_train_size = int(total_size * target_ratio)
+    target_test_size = total_size - target_train_size
     
-    for shape in class_list:
-        bias = bias_dict[shape]
-        train_tr_num = int(train_class_num * bias)
-        train_ba_num = int(train_class_num * (1 - bias))
-        val_tr_num = int(val_class_num * bias)
-        val_ba_num = int(val_class_num * (1 - bias))
-        test_tr_num = int(test_class_num * 0.5)
-        test_ba_num = int(test_class_num * 0.5)
-        train_list += tr_dataset[shape][:train_tr_num] + ba_dataset[shape][:train_ba_num]
-        val_list += tr_dataset[shape][train_tr_num:train_tr_num + val_tr_num] + ba_dataset[shape][train_ba_num:train_ba_num + val_ba_num]
-        test_list += tr_dataset[shape][train_tr_num + val_tr_num:train_tr_num + val_tr_num + test_tr_num] + ba_dataset[shape][train_ba_num + val_ba_num:train_ba_num + val_ba_num + test_ba_num]
-        _, e1 = print_graph_info(tr_dataset[shape][0], "Tree", shape)
-        _, e2 = print_graph_info(ba_dataset[shape][0], "BA", shape)
-        edges_num += e1 + e2
+    if train_size > target_train_size:
+        swap_size = train_size - target_train_size
+        swap_indices = torch.randperm(train_size)[:swap_size]
+        for idx in swap_indices:
+            test_graphs.append(train_graphs[idx])
+        train_graphs = [graph for i, graph in enumerate(train_graphs) if i not in swap_indices]
 
-    random.shuffle(train_list)
-    random.shuffle(val_list)
-    random.shuffle(test_list)
-    the = float(edges_num) / (class_num * 2)
-    return train_list, val_list, test_list, the
+    elif test_size > target_test_size:
+        swap_size = test_size - target_test_size
+        swap_indices = torch.randperm(test_size)[:swap_size]
+        for idx in swap_indices:
+            train_graphs.append(test_graphs[idx])
+        test_graphs = [graph for i, graph in enumerate(test_graphs) if i not in swap_indices]
 
-def print_graph_info(G, c, o):
-    print('-' * 100)
-    print("| graph: {}-{} | nodes num:{} | edges num:{} |".format(c, o, G.num_nodes, G.num_edges))
-    print('-' * 100)
-    return G.num_nodes, G.num_edges
 
-def print_dataset_info(train_set, val_set, test_set, the):
-    class_list = ["house", "cycle", "grid", "diamond"]
-    dataset_group_dict = {}
-    dataset_group_dict["Train"] = dataset_context_object_info(train_set, "Train", class_list, the)
-    dataset_group_dict["Val"] = dataset_context_object_info(val_set, "Val   ", class_list, the)
-    dataset_group_dict["Test"] = dataset_context_object_info(test_set, "Test  ", class_list, the)
-    return dataset_group_dict
+    while len(train_graphs) + len(test_graphs) < total_size:
+        if len(train_graphs) < target_train_size:
+            train_graphs.append(test_graphs.pop())
+        else:
+            test_graphs.append(train_graphs.pop())
+    
+    if swap_prob > 0:
+        swap_size = int(swap_prob * min(len(train_graphs), len(test_graphs)))
+        if swap_size > 0:
+            swap_train = train_graphs[:swap_size]
+            swap_test = test_graphs[:swap_size]
+            train_graphs[:swap_size], test_graphs[:swap_size] = swap_test, swap_train
+    
+    val_size = int(len(train_graphs) / 8)
+    final_train_graphs, val_graphs = train_test_split(train_graphs, test_size=val_size, random_state=12345)
+    
+    return final_train_graphs, val_graphs, test_graphs
 
-def dataset_context_object_info(dataset, title, class_list, the):
-    class_num = len(class_list)
-    tr_list = [0] * class_num
-    ba_list = [0] * class_num
-    for g in dataset:
-        if g.num_edges > the: # ba
-            ba_list[g.y.item()] += 1
-        else: # tree
-            tr_list[g.y.item()] += 1
-    total = sum(tr_list) + sum(ba_list)
-    info = "{} Total:{}\n| Tree: House:{:<5d}, Cycle:{:<5d}, Grids:{:<5d}, Diams:{:<5d} \n" +\
-                        "| BA  : House:{:<5d}, Cycle:{:<5d}, Grids:{:<5d}, Diams:{:<5d} \n" +\
-                        "| All : House:{:<5d}, Cycle:{:<5d}, Grids:{:<5d}, Diams:{:<5d} \n" +\
-                        "| BIAS: House:{:.1f}%, Cycle:{:.1f}%, Grids:{:.1f}%, Diams:{:.1f}%"
-    print("-" * 150)
-    print(info.format(title, total, tr_list[0], tr_list[1], tr_list[2], tr_list[3],
-                                    ba_list[0], ba_list[1], ba_list[2], ba_list[3],
-                                    tr_list[0] +  ba_list[0],    
-                                    tr_list[1] +  ba_list[1], 
-                                    tr_list[2] +  ba_list[2], 
-                                    tr_list[3] +  ba_list[3],
-                                    100 *float(tr_list[0]) / (tr_list[0] +  ba_list[0]),
-                                    100 *float(tr_list[1]) / (tr_list[1] +  ba_list[1]),
-                                    100 *float(tr_list[2]) / (tr_list[2] +  ba_list[2]),
-                                    100 *float(tr_list[3]) / (tr_list[3] +  ba_list[3]),
-                     ))
-    print("-" * 150)
-    total_list = ba_list + tr_list
-    group_counts = torch.tensor(total_list).float()
-    return group_counts
+
+def split_dataset_ood_node(dataset, train_threshold=0.2, test_threshold=0.5, swap_prob=0.1, target_ratio=0.8):
+    top_k_indices = compute_node_feature_variances(dataset, 2)
+    train_graphs, test_graphs = [], []
+
+    for graph_idx in range(len(dataset)):
+        node_attr = dataset[graph_idx].x
+        total_nodes = node_attr.size(0)
+
+        if total_nodes == 0:
+            train_graphs.append(graph_idx)
+        else:
+            feature_0_proportion = (node_attr[:, top_k_indices[0]] == 1).float().mean().item()
+            feature_1_proportion = (node_attr[:, top_k_indices[1]] == 1).float().mean().item()
+        
+            if feature_0_proportion < train_threshold and feature_1_proportion > test_threshold:
+                test_graphs.append(graph_idx)
+            else:
+                train_graphs.append(graph_idx)
+
+    train_size = len(train_graphs)
+    test_size = len(test_graphs)
+    
+    total_size = len(dataset)
+    target_train_size = int(total_size * target_ratio)
+    target_test_size = total_size - target_train_size
+    
+    if train_size > target_train_size:
+        swap_size = train_size - target_train_size
+        swap_indices = torch.randperm(train_size)[:swap_size]
+        for idx in swap_indices:
+            test_graphs.append(train_graphs[idx])
+        train_graphs = [graph for i, graph in enumerate(train_graphs) if i not in swap_indices]
+
+    elif test_size > target_test_size:
+        swap_size = test_size - target_test_size
+        swap_indices = torch.randperm(test_size)[:swap_size]
+        for idx in swap_indices:
+            train_graphs.append(test_graphs[idx])
+        test_graphs = [graph for i, graph in enumerate(test_graphs) if i not in swap_indices]
+
+    while len(train_graphs) + len(test_graphs) < total_size:
+        if len(train_graphs) < target_train_size:
+            train_graphs.append(test_graphs.pop())
+        else:
+            test_graphs.append(train_graphs.pop())
+    
+    if swap_prob > 0:
+        swap_size = int(swap_prob * min(len(train_graphs), len(test_graphs)))
+        if swap_size > 0:
+            swap_train = train_graphs[:swap_size]
+            swap_test = test_graphs[:swap_size]
+            train_graphs[:swap_size], test_graphs[:swap_size] = swap_test, swap_train
+    
+    val_size = int(len(train_graphs) / 8)
+    final_train_indices, val_indices = train_test_split(train_graphs, test_size=val_size, random_state=12345)
+    
+    return final_train_indices, val_indices, test_graphs
+
+
+def split_dataset_ood_label(dataset, train_threshold=0.2, test_threshold=0.8, swap_prob=0.1, target_ratio=0.8, scale_factor=5):
+    train_graphs = []
+    test_graphs = []
+
+    for graph_idx in range(len(dataset)):
+        label = dataset[graph_idx].y.item()
+        if label == 0:
+            train_graphs.append(graph_idx)
+        else:
+            test_graphs.append(graph_idx)
+
+    train_size = len(train_graphs)
+    test_size = len(test_graphs)
+    total_size = len(dataset)
+    # print('train_size', train_size)
+    # print('test_size', test_size)
+
+    if train_size > test_size * scale_factor:
+        desired_train_size = test_size * scale_factor
+        total_size = desired_train_size + test_size
+        if train_size > desired_train_size:
+            train_graphs = train_graphs[:desired_train_size]
+
+    target_train_size = int(total_size * target_ratio)
+    target_test_size = total_size - target_train_size
+    new_train_size = len(train_graphs)
+    # print('target_train_size', target_train_size)
+    # print('target_test_size', target_test_size)
+
+  
+    if new_train_size > target_train_size:
+        swap_size = new_train_size - target_train_size
+        swap_indices = torch.randperm(new_train_size)[:swap_size]
+        for idx in swap_indices:
+            test_graphs.append(train_graphs[idx])
+        train_graphs = [graph for i, graph in enumerate(train_graphs) if i not in swap_indices]
+
+    elif test_size > target_test_size:
+        swap_size = test_size - target_test_size
+        swap_indices = torch.randperm(test_size)[:swap_size]
+        for idx in swap_indices:
+            train_graphs.append(test_graphs[idx])
+        test_graphs = [graph for i, graph in enumerate(test_graphs) if i not in swap_indices]
+
+    while len(train_graphs) + len(test_graphs) < total_size:
+        if len(train_graphs) < target_train_size:
+            train_graphs.append(test_graphs.pop())
+        else:
+            test_graphs.append(train_graphs.pop())
+    
+    while len(train_graphs) + len(test_graphs) < total_size:
+        if len(train_graphs) < target_train_size:
+            if test_graphs:  
+                train_graphs.append(test_graphs.pop())
+        else:
+            if train_graphs:  
+                test_graphs.append(train_graphs.pop())
+
+    if swap_prob > 0:
+        swap_size = int(swap_prob * min(len(train_graphs), len(test_graphs)))
+        if swap_size > 0:
+            swap_train = train_graphs[:swap_size]
+            swap_test = test_graphs[:swap_size]
+            train_graphs[:swap_size], test_graphs[:swap_size] = swap_test, swap_train
+
+    
+    val_size = int(len(train_graphs) / 8)
+    final_train_indices, val_indices = train_test_split(train_graphs, test_size=val_size, random_state=12345)
+    
+    return final_train_indices, val_indices, test_graphs
+
+
+
+
+def split_ogb_bias(dataset, bias=0.5):
+    all_indices = list(range(len(dataset)))
+    label_0_indices = [idx for idx in all_indices if dataset[idx].y.item() == 0]
+    label_1_indices = [idx for idx in all_indices if dataset[idx].y.item() == 1]
+    # print('len(label_0_indices):', len(label_0_indices))
+    # print('len(label_1_indices):', len(label_1_indices))
+    
+    num_label_1_test = min(len(label_1_indices), int(len(label_1_indices) / 8.2))
+    num_label_0_test = num_label_1_test
+
+    test_label_0_indices = label_0_indices[:num_label_0_test]
+    test_label_1_indices = label_1_indices[:num_label_1_test]
+    
+    # test_label_0_indices = np.random.choice(label_0_indices, num_label_0_test, replace=False)
+    # test_label_1_indices = np.random.choice(label_1_indices, num_label_1_test, replace=False)
+    # print('len(test_label_1_indices):', len(test_label_1_indices))
+    
+    test_indices = list(test_label_0_indices) + list(test_label_1_indices)
+    test_size = len(test_indices)
+    test_set = set(test_indices)  
+    
+    remaining_indices = [idx for idx in all_indices if idx not in test_set]
+    # print('remaining_data:', len(dataset)-test_size)
+    # print('len(remaining_indices):', len(remaining_indices))
+    remaining_label_0_indices = [idx for idx in remaining_indices if dataset[idx].y.item() == 0]
+    remaining_label_1_indices = [idx for idx in remaining_indices if dataset[idx].y.item() == 1]
+    
+ 
+    train_size = int(test_size * 4)
+    num_label_0_train = int(train_size * (1 - bias))
+    num_label_1_train = train_size - num_label_0_train
+    
+    # train_label_0_indices = np.random.choice(remaining_label_0_indices, num_label_0_train, replace=False)
+    # train_label_1_indices = np.random.choice(remaining_label_1_indices, num_label_1_train, replace=False)
+    train_label_0_indices = remaining_label_0_indices[:num_label_0_train]
+    train_label_1_indices = remaining_label_1_indices[:num_label_1_train]
+    
+    # print('len(train_label_0_indices):', len(train_label_0_indices))
+    # print('len(train_label_1_indices):', len(train_label_1_indices))
+    
+    train_indices = list(train_label_0_indices) + list(train_label_1_indices)
+    # train_set = set(train_indices)  # Convert to set for faster lookups
+    
+    val_size = int(train_size / 8)
+    final_train_indices, val_indices = train_test_split(train_indices, test_size=val_size, random_state=12345)
+    # print('total size:', len(final_train_indices)+len(val_indices)+len(test_indices))
+    
+    return final_train_indices, val_indices, test_indices
+
+
